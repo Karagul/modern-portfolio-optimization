@@ -1,12 +1,15 @@
 from __future__ import division
 import pandas_datareader as pdr
+from pandas_datareader.quandl import QuandlReader 
 from collections import defaultdict
 import numpy as np
 from numpy import dot, sqrt
 import pandas as pd
 import datetime
+from random import uniform
 from scipy.stats import linregress
-from scipy.optimize import minimize
+from scipy.optimize import minimize, fsolve
+from scipy.interpolate import splrep, splev
 import plotly
 import plotly.plotly as py
 import plotly.graph_objs as go
@@ -37,7 +40,7 @@ class Calcualtion_pack():
     def __init__(self, stock_ticks=["AAPL","MMM"], market_indecies=['^GSPC',"^DJI"], 
                  start=datetime.datetime(1997, 1, 1), end=datetime.date.today(), 
                  risk_free_rate= 0.02, shorting_allowed=False, 
-                 window_size=None, window_move=None):
+                 window_size=None, window_move=None, source="quandl"):
 
         self.stock_ticks = stock_ticks
         self.market_indecies = market_indecies #Concatenate different markets indecies to get "real" market
@@ -48,15 +51,31 @@ class Calcualtion_pack():
         self.shorting_allowed=shorting_allowed
         self.window_move = window_move
         self.window_size = window_size
-
-
+        self.source = source
 
     def get_monthly_data(self):
-        raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
-                                  "google", self.start, self.end)
-        adj_data = raw_data["Close"]
-        self.data = adj_data.groupby(pd.Grouper(freq='MS')).mean() #adjusted monthly data
 
+        if self.source == "google":
+            raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
+                                      "google", self.start, self.end)
+            adj_data = raw_data["Close"]
+
+        if self.source == "quandl":
+            adj_data = defaultdict()
+
+            for ticker in self.stock_ticks + self.market_indecies:
+                data = QuandlReader(symbols=ticker, start=self.start, end=self.end, 
+                        api_key="FhsuNoHsxNw7jGVG1b7R").read()
+                adj_data[ticker] =  data["AdjClose"]
+
+            # for ticker in self.market_indecies:
+            #     data = QuandlReader(symbols=ticker, start=self.start, end=self.end, 
+            #             api_key="FhsuNoHsxNw7jGVG1b7R").read()
+            #     adj_data[ticker] =  data["IndexValue"]
+
+            adj_data = pd.DataFrame(adj_data)
+
+        self.data = adj_data.groupby(pd.Grouper(freq='MS')).mean() #adjusted monthly data
 
     def calculate_log_change(self):
         self.log_change_data = (np.log(self.data) - np.log(self.data).shift(1)).dropna()
@@ -71,9 +90,9 @@ class Calcualtion_pack():
         #getting beta as covar/var
         d = defaultdict(list)
         for index in self.market_indecies:
-            var = self.cov_matrix.loc[index,index]
+            var = self.cov_matrix.loc[index, index]
             for tick in self.stock_ticks:
-                covar = self.cov_matrix.loc[index,tick]
+                covar = self.cov_matrix.loc[index, tick]
                 d[index] += [covar/var]
         self.beta1 = pd.DataFrame(data=d, index=self.stock_ticks)
 
@@ -106,10 +125,6 @@ class Calcualtion_pack():
         self.exp_return_yr = np.exp(self.exp_return*12)-1
 
         
-    def plot_efficient_portfolio():
-        pass
-    
-    
     def solve_quadratic_weights_of_portfolio(self):
         """
             where:
@@ -127,16 +142,12 @@ class Calcualtion_pack():
         def exp_return(W, R):
             return np.dot(W.T, R).sum() # Expectd_portfolio_return
         
-        def fitness(W, R, C, r):
-            # For given level of return r, find weights which minimizes
-            # portfolio variance.
-            
-            Pm = exp_return(W, R)
+        def fitness(W, C, r):
             Pv = quad_var(W, C) 
             return Pv
 
         #Bounds (inequality constraints)
-        b = [(0.,1.) for i in W] # weights between 0%..100%. -No shorting
+        b = [(0.,1.) for i in W] # weights between 0%..100%. -No shorting - no borrowing
         # Equality constraints
         h = ({'type':'eq', 'fun': lambda W: sum(W) -1.}, # Sum of weights = 100%
              {'type':'eq', 'fun': lambda W: exp_return(W, R) - r})  # equalizes portfolio return to r
@@ -145,22 +156,65 @@ class Calcualtion_pack():
         Vf, Wf = [], []
        
         for r in Rf:
-            optimized = minimize(fitness, W, args=(R, C, r), method='SLSQP', #Sequential Least SQuares Programming 
+            # For given level of return r, find weights which minimizes portfolio variance.
+            optimized = minimize(fitness, W, args=(C, r), method='SLSQP', #Sequential Least SQuares Programming 
                                  constraints=h, bounds=b)
-            
             X = optimized.x
             Wf.append(X)
             Vx = quad_var(X,C)
             Vf.append(Vx)
-        
+
         self.frontier_exp_return = Rf #Y axis of EFF
         self.frontier_risk = Vf #X axis of EFF
         self.frontier_weights = [[round(w*100,2) for w in ws] for ws in Wf] #TODO might be done directly in pandas
     
+    def calculate_CML_and_efficient_portfolio(self):
+
+        Vf = self.frontier_risk
+        Rf = self.frontier_exp_return
+
+        idx = np.argmin(Vf) #index of efficient frontiers
+        EFF_Vf = Vf[idx:]
+        EFF_Rf = Rf[idx:]
+        tck = splrep(EFF_Vf, EFF_Rf)
+
+        def f(x, tck=tck):
+            # Efficient frontier function (splines approximation)
+            return splev(x, tck, der=0)
+            
+        def df(x, tck=tck):
+            # First derivative of efficient frontier function
+            return splev(x, tck, der=1)
+
+        def equations((b,a,x), rf=self.risk_free_rate):
+            intercept = rf - b
+            slope = a - df(x)
+            EFPx = a*x + rf - f(x) # Risk where the CML is the tangent of the EFF ie. x of efficient portfolio 
+            return intercept, slope, EFPx
+
+        init_b = self.risk_free_rate
+        init_a = uniform(0.1, 0.9)
+        init_x = uniform(0.1, 0.9)
+        b,a, EFPx = fsolve(equations, [init_b, init_a, init_x]) # Using a Newton-Raphson optimisation algorithm
+        EFPy = f(EFPx)
+
+        def CML(x, b=b,a=a):
+            return x*a+b
+
+        self.EEF_func = f
+        self.CML_func = CML
+        self.EFP = (EFPx, EFPy)
+
     
     def plot_EFF(self):
-        X = self.frontier_risk
-        Y = self.frontier_exp_return
+        Xeef = self.frontier_risk
+        Yeef = self.frontier_exp_return
+        Xcml = [0, max(Xeef) + 0.2]
+        Ycml = [self.CML_func(x) for x in Xeef]
+
+        Xeef_aprox = Xcml
+        Yeef_aprox = [self.EEF_func(x) for x in Xcml]
+
 
         plotly.tools.set_credentials_file(username="TheVizWiz", api_key="92x5KNp4VDPBDGNtLR2l")
 
@@ -169,19 +223,43 @@ class Calcualtion_pack():
             T = [re.sub(r'\n', "% -- ", re.sub(r'[ ]+', " ", PD.iloc[i].to_string() )) for i in PD.index]
             return T
 
-        data = [go.Scatter(
-            x=X,
-            y=Y,
-            mode='lines',
-            marker = dict(colorscale="Electric"),
-            text = annotaions()
-        )]
+        EEF = go.Scatter(
+                    x=Xeef,
+                    y=Yeef,
+                    mode='lines',
+                    marker = dict(colorscale="Electric"),
+                    text = annotaions()
+                )
+
+        CML = go.Scatter(
+                    x = Xcml,
+                    y = Ycml,
+                    mode='lines',
+                    text = "Captial Market Line"
+                    #marker = make coler outside space of efficient frontier different collor
+                )
+
+        EFP = go.Scatter(
+                x = self.EFP[0],
+                y = self.EFP[1],
+                mode = 'marker',
+                marker = dict(size=8, symbol="circle")
+                )
+
+
+        EEF_aprox = go.Scatter(
+        		x = Xeef_aprox,
+        		y = Yeef_aprox,
+        		mode = "makers+lines",
+        		)
+
+        data = [EEF, CML] #, EFP, EEF_aprox]
 
         start = "{0}/{1}-{2}".format(self.start.day, self.start.month, self.start.year)
         end = "{0}/{1}-{2}".format(self.end.day, self.end.month, self.end.year)
         layout = go.Layout(
             title= "Efficent Frontier: from {} to {}".format(start, end),
-            showlegend=False,
+            showlegend=True,
             hovermode= 'closest',
             yaxis = dict(title="Portfolio Return"),
             xaxis = dict(title="Portfolio Variance"),
@@ -201,8 +279,8 @@ class Calcualtion_pack():
         self.calculate_regress_params()
         self.calculate_exp_return()
         self.solve_quadratic_weights_of_portfolio()
-
-
+        self.calculate_CML_and_efficient_portfolio()
+        
 
     def run_pack(self):
 
@@ -219,7 +297,6 @@ class Calcualtion_pack():
                     time = self.end - self.start
                     window = datetime.timedelta(days=self.window_size)
                     window_m = datetime.timedelta(days=self.window_move)
-                    self.final_end = self.end
 
                     while time >= datetime.timedelta(1):
                         self.end = self.start + window
@@ -230,18 +307,20 @@ class Calcualtion_pack():
                 return func_wrapper
            
             with_moving_window(one_window)()
+
             
         else:
             one_window()
 
 if __name__ == '__main__':
   
-    CP = Calcualtion_pack(stock_ticks=["AAPL","MMM","GOOGL"], 
-                            market_indecies=['NDAQ'],
+    CP = Calcualtion_pack(stock_ticks=["AAPL",'MMM'], 
+                            market_indecies=["AMZN"],
                             start=datetime.datetime(1999, 1, 1), 
-                            end=datetime.datetime(2001,1,1), 
+                            end=datetime.datetime(2010,1,1), 
                             risk_free_rate= 0.02,
-                            window_size=3650, 
-                            window_move=365)
+                            # window_size=3650, 
+                            # window_move=365
+                            )
   
     CP.run_pack()
