@@ -64,8 +64,7 @@ class Calcualtion_pack():
             adj_data = defaultdict()
 
             for ticker in self.stock_ticks + self.market_indecies:
-                data = QuandlReader(symbols=ticker, start=self.start, end=self.end, 
-                        api_key="FhsuNoHsxNw7jGVG1b7R").read()
+                data = QuandlReader(symbols="WIKI/{}".format(ticker), start=self.start, end=self.end).read()
                 adj_data[ticker] =  data["AdjClose"]
 
             # for ticker in self.market_indecies:
@@ -186,16 +185,17 @@ class Calcualtion_pack():
             # First derivative of efficient frontier function
             return splev(x, tck, der=1)
 
-        def equations((b,a,x), rf=self.risk_free_rate):
+        def equations(p, rf=self.risk_free_rate):
+            b, a, x = p
             intercept = rf - b
             slope = a - df(x)
             EFPx = a*x + rf - f(x) # Risk where the CML is the tangent of the EFF ie. x of efficient portfolio 
             return intercept, slope, EFPx
 
         init_b = self.risk_free_rate
-        init_a = uniform(0.1, 0.9)
+        init_a = uniform(0.1, 5.0)
         init_x = uniform(0.1, 0.9)
-        b,a, EFPx = fsolve(equations, [init_b, init_a, init_x]) # Using a Newton-Raphson optimisation algorithm
+        b,a, EFPx = fsolve(equations, [(init_b, init_a, init_x)]) # Using a Newton-Raphson optimisation algorithm
         EFPy = f(EFPx)
 
         def CML(x, b=b,a=a):
@@ -253,7 +253,7 @@ class Calcualtion_pack():
         		mode = "makers+lines",
         		)
 
-        data = [EEF, CML] #, EFP, EEF_aprox]
+        data = [EEF, CML, EFP] #, EEF_aprox]
 
         start = "{0}/{1}-{2}".format(self.start.day, self.start.month, self.start.year)
         end = "{0}/{1}-{2}".format(self.end.day, self.end.month, self.end.year)
@@ -314,10 +314,10 @@ class Calcualtion_pack():
 
 if __name__ == '__main__':
   
-    CP = Calcualtion_pack(stock_ticks=["AAPL",'MMM'], 
-                            market_indecies=["AMZN"],
+    CP = Calcualtion_pack(stock_ticks=["AAPL", "MMM", "GOOGL", "AMZN", "FRX", "NKE", "TSN"], 
+                            market_indecies=["NDAQ"],
                             start=datetime.datetime(1999, 1, 1), 
-                            end=datetime.datetime(2010,1,1), 
+                            end=datetime.datetime(2018,1,1), 
                             risk_free_rate= 0.02,
                             # window_size=3650, 
                             # window_move=365
