@@ -55,22 +55,16 @@ class Calcualtion_pack():
 
     def get_monthly_data(self):
 
-        if self.source == "google":
+        if self.source in ["google", "yahoo"]: #depricated 
             raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
-                                      "google", self.start, self.end)
+                                      self.source, self.start, self.end)
             adj_data = raw_data["Close"]
 
         if self.source == "quandl":
             adj_data = defaultdict()
-
             for ticker in self.stock_ticks + self.market_indecies:
                 data = QuandlReader(symbols="WIKI/{}".format(ticker), start=self.start, end=self.end).read()
                 adj_data[ticker] =  data["AdjClose"]
-
-            # for ticker in self.market_indecies:
-            #     data = QuandlReader(symbols=ticker, start=self.start, end=self.end, 
-            #             api_key="FhsuNoHsxNw7jGVG1b7R").read()
-            #     adj_data[ticker] =  data["IndexValue"]
 
             adj_data = pd.DataFrame(adj_data)
 
@@ -119,8 +113,10 @@ class Calcualtion_pack():
         
 
     def calculate_exp_return(self):
-        #Using CAPM
-        self.exp_return = self.risk_free_rate + (self.market_returns-self.risk_free_rate)* self.beta
+        # #Using CAPM
+        # self.exp_return = self.risk_free_rate + (self.market_returns-self.risk_free_rate) * self.beta
+        # Using plane mean value
+        self.exp_return = self.log_change_data[self.stock_ticks].mean()
         self.exp_return_yr = np.exp(self.exp_return*12)-1
 
         
@@ -172,49 +168,60 @@ class Calcualtion_pack():
         Vf = self.frontier_risk
         Rf = self.frontier_exp_return
 
-        idx = np.argmin(Vf) #index of efficient frontiers
-        EFF_Vf = Vf[idx:]
-        EFF_Rf = Rf[idx:]
-        tck = splrep(EFF_Vf, EFF_Rf)
+        def sharpe_ratio(Rp, Vp, rf):
+            return (Rp - rf) / Vp
 
-        def f(x, tck=tck):
-            # Efficient frontier function (splines approximation)
-            return splev(x, tck, der=0)
+        self.EFFsr = sharpe_ratio(Rf, Vf, self.risk_free_rate)
+
+        idx = np.argmax(self.EFFsr) # index of "market" portfolio
+        self.EFFpx = Vf[idx]
+        self.EFFpy = Rf[idx]
+
+        self.CMLy = [self.risk_free_rate, self.EFFpy]
+        self.CMLx = [0, self.EFFpx]
+
+        def CML():
+            risk_free_rate + market_return * Sharpe_ratio_of_the_market_portfolio
+
+       
+
+        # tck = splrep(EFF_Vf, EFF_Rf)
+
+        # def f(x, tck=tck):
+        #     # Efficient frontier function (splines approximation)
+        #     return splev(x, tck, der=0)
             
-        def df(x, tck=tck):
-            # First derivative of efficient frontier function
-            return splev(x, tck, der=1)
+        # def df(x, tck=tck):
+        #     # First derivative of efficient frontier function
+        #     return splev(x, tck, der=1)
 
-        def equations(p, rf=self.risk_free_rate):
-            b, a, x = p
-            intercept = rf - b
-            slope = a - df(x)
-            EFPx = a*x + rf - f(x) # Risk where the CML is the tangent of the EFF ie. x of efficient portfolio 
-            return intercept, slope, EFPx
+        # def equations(p, rf=self.risk_free_rate):
+        #     b, a, x = p
+        #     intercept = rf - b
+        #     slope = a - df(x)
+        #     EFPx = a*x + rf - f(x) # Risk where the CML is the tangent of the EFF ie. x of efficient portfolio 
+        #     return intercept, slope, EFPx
 
-        init_b = self.risk_free_rate
-        init_a = uniform(0.1, 5.0)
-        init_x = uniform(0.1, 0.9)
-        b,a, EFPx = fsolve(equations, [(init_b, init_a, init_x)]) # Using a Newton-Raphson optimisation algorithm
-        EFPy = f(EFPx)
+        # init_b = uniform(0.1, 5.0)
+        # init_a = uniform(0.1, 5.0)
+        # init_x = uniform(0.1, 5.0)
+        # b,a, EFPx = fsolve(equations, [(init_b, init_a, init_x)]) # Using a Newton-Raphson optimisation algorithm
+        # EFPy = f(EFPx)
 
-        def CML(x, b=b,a=a):
-            return x*a+b
+        # def CML(x, b, a):
+        #     return x*a+b
 
-        self.EEF_func = f
-        self.CML_func = CML
-        self.EFP = (EFPx, EFPy)
+        # self.EEF_func = f
+        # self.CMLy = [CML(x, b, a) for x in Vf]
+        # self.EFP = (EFPx, EFPy)
 
     
     def plot_EFF(self):
         Xeef = self.frontier_risk
         Yeef = self.frontier_exp_return
-        Xcml = [0, max(Xeef) + 0.2]
-        Ycml = [self.CML_func(x) for x in Xeef]
 
-        Xeef_aprox = Xcml
-        Yeef_aprox = [self.EEF_func(x) for x in Xcml]
-
+        # Xcml = Xeef
+        # Ycml = self.CMLy
 
         plotly.tools.set_credentials_file(username="TheVizWiz", api_key="92x5KNp4VDPBDGNtLR2l")
 
@@ -226,34 +233,34 @@ class Calcualtion_pack():
         EEF = go.Scatter(
                     x=Xeef,
                     y=Yeef,
-                    mode='lines',
-                    marker = dict(colorscale="Electric"),
+                    mode='markers+lines',
+                    marker = dict(colorscale="Electric", color=self.EFFsr, showscale=True),
                     text = annotaions()
                 )
 
         CML = go.Scatter(
-                    x = Xcml,
-                    y = Ycml,
+                    x = self.CMLx,
+                    y = self.CMLy,
                     mode='lines',
                     text = "Captial Market Line"
                     #marker = make coler outside space of efficient frontier different collor
                 )
 
         EFP = go.Scatter(
-                x = self.EFP[0],
-                y = self.EFP[1],
+                x = self.EFFpx,
+                y = self.EFFpy,
                 mode = 'marker',
-                marker = dict(size=8, symbol="circle")
+                marker = dict(size=10, symbol="circle")
                 )
 
 
-        EEF_aprox = go.Scatter(
-        		x = Xeef_aprox,
-        		y = Yeef_aprox,
-        		mode = "makers+lines",
-        		)
+        # EEF_aprox = go.Scatter(
+        # 		x = Xeef_aprox,
+        # 		y = Yeef_aprox,
+        # 		mode = "makers+lines",
+        # 		)
 
-        data = [EEF, CML, EFP] #, EEF_aprox]
+        data = [EEF, EFP, CML] # EEF_aprox]
 
         start = "{0}/{1}-{2}".format(self.start.day, self.start.month, self.start.year)
         end = "{0}/{1}-{2}".format(self.end.day, self.end.month, self.end.year)
