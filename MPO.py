@@ -15,6 +15,8 @@ import plotly.plotly as py
 import plotly.graph_objs as go
 import re
 
+
+import pickle
 """
 Mess:
     Market returns in pct: 
@@ -53,26 +55,30 @@ class Calcualtion_pack():
         self.window_size = window_size
         self.source = source
 
+        self.develop = True
+
     def get_monthly_data(self):
+        if self.develop == True:
+            self.data = pickle.load( open( "develop.p", "rb" ) )
 
-        if self.source in ["google", "yahoo"]: #depricated 
-            raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
-                                      self.source, self.start, self.end)
-            adj_data = raw_data["Close"]
+        else:
+            if self.source in ["google", "yahoo"]: #depricated 
+                raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
+                                          self.source, self.start, self.end)
+                adj_data = raw_data["Close"]
 
-        if self.source == "quandl":
-            adj_data = defaultdict()
-            for ticker in self.stock_ticks + self.market_indecies:
-                data = QuandlReader(symbols="WIKI/{}".format(ticker), start=self.start, end=self.end).read()
-                adj_data[ticker] =  data["AdjClose"]
+            if self.source == "quandl":
+                adj_data = defaultdict()
+                for ticker in self.stock_ticks + self.market_indecies:
+                    data = QuandlReader(symbols="WIKI/{}".format(ticker), start=self.start, end=self.end).read()
+                    adj_data[ticker] =  data["AdjClose"]
 
-            adj_data = pd.DataFrame(adj_data)
+                adj_data = pd.DataFrame(adj_data)
 
-        self.data = adj_data.groupby(pd.Grouper(freq='MS')).mean() #adjusted monthly data
+            self.data = adj_data.groupby(pd.Grouper(freq='MS')).mean() #adjusted monthly data
 
     def calculate_log_change(self):
         self.log_change_data = (np.log(self.data) - np.log(self.data).shift(1)).dropna()
-
 
     def calculate_covariance_and_var(self):
         self.cov_matrix = self.log_change_data.cov() * 12
@@ -119,109 +125,101 @@ class Calcualtion_pack():
         self.exp_return = self.log_change_data[self.stock_ticks].mean()
         self.exp_return_yr = np.exp(self.exp_return*12)-1
 
-        
-    def solve_quadratic_weights_of_portfolio(self):
-        """
-            where:
-                R is the vector of CAPM expected returns
-                C is the var-covariance matrix
-                W is the weights
-        """            
-        R = self.exp_return_yr.values
-        C = self.cov_matrix.iloc[:-1,:-1].values
-        W = R*0 + 1/len(R) #Initialize equal procent weights
-        
+    
+
+    # def solve_quadratic_weights_of_portfolios(self): 
+    def solve_elements_for_plot(self):
+
+        """Operations"""
         def quad_var(W, C):
-            return dot(dot(W.T, C), W) # Quadratic expression to calculate portfolio risk
-        
+            return np.sqrt(dot(dot(W.T, C), W)) # Quadratic expression to calculate portfolio risk
+    
         def exp_return(W, R):
             return np.dot(W.T, R).sum() # Expectd_portfolio_return
-        
-        def fitness(W, C, r):
-            Pv = quad_var(W, C) 
-            return Pv
 
-        #Bounds (inequality constraints)
-        b = [(0.,1.) for i in W] # weights between 0%..100%. -No shorting - no borrowing
-        # Equality constraints
-        h = ({'type':'eq', 'fun': lambda W: sum(W) -1.}, # Sum of weights = 100%
-             {'type':'eq', 'fun': lambda W: exp_return(W, R) - r})  # equalizes portfolio return to r
-        
-        Rf = np.linspace(min(R), max(R), num=100)
-        Vf, Wf = [], []
-       
-        for r in Rf:
-            # For given level of return r, find weights which minimizes portfolio variance.
-            optimized = minimize(fitness, W, args=(C, r), method='SLSQP', #Sequential Least SQuares Programming 
-                                 constraints=h, bounds=b)
-            X = optimized.x
-            Wf.append(X)
-            Vx = quad_var(X,C)
-            Vf.append(Vx)
+        def sharpe_ratio(Rf, Vf, rf):
+            return (Rf - rf) / Vf
+
+        def CML(Vf, rf, Sr):
+            # risk_free_rate + risk * Sharpe_ratio_of_the_market_portfolio
+            return Vf * Sr + rf
+
+        def qsolve(R, Rf, C):
+            """
+            where:
+                R is the vector of expected returns
+                Rf is the 
+                C is the var-covariance matrix
+            """        
+
+            # TODO: add options to short and borrow           
+
+            W = R*0 + 1/len(R) #Initialize equal procent weights
+            #Bounds (inequality constraints)
+            b = [(0.,1.) for i in W] # weights between 0%..100%. - no borrowing
+            # Equality constraints
+            h = ({'type':'eq', 'fun': lambda W: sum(W)-1.}, # Sum of weights = 100% -No shorting 
+                 {'type':'eq', 'fun': lambda W: exp_return(W, R) - r})  # equalizes portfolio return to r
+
+            def fitness(W, C, r):
+                Pv = quad_var(W, C) 
+                return Pv
+            
+            Vf, Wf = [], []
+
+            for r in Rf:
+                # For given level of return r, find weights which minimizes portfolio variance.
+                optimized = minimize(fitness, W, args=(C, r), method='SLSQP', #Sequential Least SQuares Programming 
+                                     constraints=h, bounds=b)
+                X = optimized.x
+                Wf.append(X)
+                Vx = quad_var(X,C)
+                Vf.append(Vx)
+
+            return Vf, Wf
+
+        R = self.exp_return_yr.values
+        Rf = np.linspace(min(R), max(R), num=100) 
+        C = self.cov_matrix.iloc[:-1,:-1].values #cov matrix without market index
+
+        Vf, Wf = qsolve(R, Rf, C)
 
         self.frontier_exp_return = Rf #Y axis of EFF
         self.frontier_risk = Vf #X axis of EFF
         self.frontier_weights = [[round(w*100,2) for w in ws] for ws in Wf] #TODO might be done directly in pandas
-    
-    def calculate_CML_and_efficient_portfolio(self):
-
-        Vf = self.frontier_risk
-        Rf = self.frontier_exp_return
-
-        def sharpe_ratio(Rp, Vp, rf):
-            return (Rp - rf) / Vp
-
-        self.EFFsr = sharpe_ratio(Rf, Vf, self.risk_free_rate)
-
+        rf = self.risk_free_rate
+        self.EFFsr = sharpe_ratio(Rf, Vf, rf) #sharpe ratio if portfolios on the eficient frontier
         idx = np.argmax(self.EFFsr) # index of "market" portfolio
-        self.EFFpx = Vf[idx]
-        self.EFFpy = Rf[idx]
+        MPsr = self.EFFsr[idx] # sharpe ratio of "market" portfolio ie. slope of CML
 
-        self.CMLy = [self.risk_free_rate, self.EFFpy]
-        self.CMLx = [0, self.EFFpx]
+        self.marketPx = Vf[idx] # "market" portfolio x and y
+        self.marketPy = Rf[idx]
 
-        def CML():
-            risk_free_rate + market_return * Sharpe_ratio_of_the_market_portfolio
+        self.CMLx = [0] + Vf
+        self.CMLy = [CML(x, rf, MPsr) for x in self.CMLx]       
 
-       
+        self.montecarlo = True
+        if self.montecarlo:
+            def MCsimulation(R, C, rf): # borrowed from: gist.github.com/PyDataBlog/2d5740e4199f2f898b68e154f8951ef2
+                returns, volatility, ratio = [], [], []
+                for single_portfolio in range(10000): # number of simulations
+                    W = np.random.random(len(self.stock_ticks))
+                    W /= np.sum(W)
+                    ret = exp_return(W, R)
+                    vol = quad_var(W, C)
+                    returns.append(ret)
+                    volatility.append(vol)
+                    ratio.append(sharpe_ratio(ret, vol, rf))
 
-        # tck = splrep(EFF_Vf, EFF_Rf)
-
-        # def f(x, tck=tck):
-        #     # Efficient frontier function (splines approximation)
-        #     return splev(x, tck, der=0)
-            
-        # def df(x, tck=tck):
-        #     # First derivative of efficient frontier function
-        #     return splev(x, tck, der=1)
-
-        # def equations(p, rf=self.risk_free_rate):
-        #     b, a, x = p
-        #     intercept = rf - b
-        #     slope = a - df(x)
-        #     EFPx = a*x + rf - f(x) # Risk where the CML is the tangent of the EFF ie. x of efficient portfolio 
-        #     return intercept, slope, EFPx
-
-        # init_b = uniform(0.1, 5.0)
-        # init_a = uniform(0.1, 5.0)
-        # init_x = uniform(0.1, 5.0)
-        # b,a, EFPx = fsolve(equations, [(init_b, init_a, init_x)]) # Using a Newton-Raphson optimisation algorithm
-        # EFPy = f(EFPx)
-
-        # def CML(x, b, a):
-        #     return x*a+b
-
-        # self.EEF_func = f
-        # self.CMLy = [CML(x, b, a) for x in Vf]
-        # self.EFP = (EFPx, EFPy)
+                self.MCx = volatility
+                self.MCy = returns
+                self.MCsr = ratio
+            MCsimulation(R, C, rf)
 
     
     def plot_EFF(self):
         Xeef = self.frontier_risk
         Yeef = self.frontier_exp_return
-
-        # Xcml = Xeef
-        # Ycml = self.CMLy
 
         plotly.tools.set_credentials_file(username="TheVizWiz", api_key="92x5KNp4VDPBDGNtLR2l")
 
@@ -231,40 +229,61 @@ class Calcualtion_pack():
             return T
 
         EEF = go.Scatter(
-                    x=Xeef,
-                    y=Yeef,
-                    mode='markers+lines',
-                    marker = dict(colorscale="Electric", color=self.EFFsr, showscale=True),
-                    text = annotaions()
-                )
-
-        CML = go.Scatter(
-                    x = self.CMLx,
-                    y = self.CMLy,
-                    mode='lines',
-                    text = "Captial Market Line"
-                    #marker = make coler outside space of efficient frontier different collor
+                x=Xeef,
+                y=Yeef,
+                mode='lines+markers',
+                marker = dict(size=8),
+                text = annotaions(),
+                name = "Efficient Frontier"
                 )
 
         EFP = go.Scatter(
-                x = self.EFFpx,
-                y = self.EFFpy,
-                mode = 'marker',
-                marker = dict(size=10, symbol="circle")
+                x = self.marketPx,
+                y = self.marketPy,
+                mode = 'markers',
+                marker = dict(size=10, symbol="circle"),
+                name = "Market/Efficient portfolio"
                 )
 
+        data = [EEF, EFP]
 
-        # EEF_aprox = go.Scatter(
-        # 		x = Xeef_aprox,
-        # 		y = Yeef_aprox,
-        # 		mode = "makers+lines",
-        # 		)
+        if self.risk_free_rate > 0:
+            CML = go.Scatter(
+                x = self.CMLx,
+                y = self.CMLy,
+                mode='lines',
+                #text = "Captial Market Line", #solve weights and show as text
+                name = "Capital market line"
+                #marker = make coler outside space of efficient frontier different collor
+                )
+            data.insert(0, CML)
 
-        data = [EEF, EFP, CML] # EEF_aprox]
+        if self.montecarlo:
+            MonteCarlo = go.Scatter(
+                x = self.MCx,
+                y = self.MCy,
+                mode = "markers",
+                marker = dict(colorscale="Electric", color=self.MCsr, showscale=True, colorbar=dict(title="Sharpe Ratio", titleside="right")),
+                name = "MonteCarlo Simulated portfolios"
+                ) 
+            data.insert(0, MonteCarlo)
 
         start = "{0}/{1}-{2}".format(self.start.day, self.start.month, self.start.year)
         end = "{0}/{1}-{2}".format(self.end.day, self.end.month, self.end.year)
         layout = go.Layout(
+            legend=dict(
+                x=0,
+                y=1,
+                traceorder='normal',
+                font=dict(
+                    family='sans-serif',
+                    size=12,
+                    color='#000'
+                ),
+                bgcolor='#E2E2E2',
+                bordercolor='#FFFFFF',
+                borderwidth=2
+            ),
             title= "Efficent Frontier: from {} to {}".format(start, end),
             showlegend=True,
             hovermode= 'closest',
@@ -285,9 +304,8 @@ class Calcualtion_pack():
         self.calculate_beta()
         self.calculate_regress_params()
         self.calculate_exp_return()
-        self.solve_quadratic_weights_of_portfolio()
-        self.calculate_CML_and_efficient_portfolio()
-        
+        self.solve_elements_for_plot()
+
 
     def run_pack(self):
 
@@ -321,10 +339,10 @@ class Calcualtion_pack():
 
 if __name__ == '__main__':
   
-    CP = Calcualtion_pack(stock_ticks=["AAPL", "MMM", "GOOGL", "AMZN", "FRX", "NKE", "TSN"], 
+    CP = Calcualtion_pack(stock_ticks=["AAPL","MMM", "GOOGL", "AMZN"], 
                             market_indecies=["NDAQ"],
-                            start=datetime.datetime(1999, 1, 1), 
-                            end=datetime.datetime(2018,1,1), 
+                            start=datetime.datetime(2005, 1, 1), 
+                            end=datetime.datetime(2008,1,1), 
                             risk_free_rate= 0.02,
                             # window_size=3650, 
                             # window_move=365
