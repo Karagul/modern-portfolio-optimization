@@ -55,7 +55,7 @@ class Calcualtion_pack():
         self.window_size = window_size
         self.source = source
 
-        self.develop = True
+        self.develop = False
 
     def get_monthly_data(self):
         if self.develop == True:
@@ -125,7 +125,6 @@ class Calcualtion_pack():
         self.exp_return = self.log_change_data[self.stock_ticks].mean()
         self.exp_return_yr = np.exp(self.exp_return*12)-1
 
-    
 
     # def solve_quadratic_weights_of_portfolios(self): 
     def solve_elements_for_plot(self):
@@ -191,6 +190,7 @@ class Calcualtion_pack():
         self.EFFsr = sharpe_ratio(Rf, Vf, rf) #sharpe ratio if portfolios on the eficient frontier
         idx = np.argmax(self.EFFsr) # index of "market" portfolio
         MPsr = self.EFFsr[idx] # sharpe ratio of "market" portfolio ie. slope of CML
+        self.Wmp = self.frontier_weights[idx]# weights of market portfolio
 
         self.marketPx = Vf[idx] # "market" portfolio x and y
         self.marketPy = Rf[idx]
@@ -200,7 +200,7 @@ class Calcualtion_pack():
 
         self.montecarlo = True
         if self.montecarlo:
-            def MCsimulation(R, C, rf): # borrowed from: gist.github.com/PyDataBlog/2d5740e4199f2f898b68e154f8951ef2
+            def MCsimulation(R, C, rf): # inspiration from: gist.github.com/PyDataBlog/2d5740e4199f2f898b68e154f8951ef2
                 returns, volatility, ratio = [], [], []
                 for single_portfolio in range(10000): # number of simulations
                     W = np.random.random(len(self.stock_ticks))
@@ -237,11 +237,14 @@ class Calcualtion_pack():
                 name = "Efficient Frontier"
                 )
 
+        EFP_weights = str(zip(self.Wmp, self.stock_ticks))
+
         EFP = go.Scatter(
                 x = self.marketPx,
                 y = self.marketPy,
                 mode = 'markers',
                 marker = dict(size=10, symbol="circle"),
+                text =  EFP_weights,
                 name = "Market/Efficient portfolio"
                 )
 
@@ -263,7 +266,8 @@ class Calcualtion_pack():
                 x = self.MCx,
                 y = self.MCy,
                 mode = "markers",
-                marker = dict(colorscale="Electric", color=self.MCsr, showscale=True, colorbar=dict(title="Sharpe Ratio", titleside="right")),
+                marker = dict(colorscale="Electric", color=self.MCsr, showscale=True, 
+                              colorbar=dict(title="Sharpe Ratio", titleside="right")),
                 name = "MonteCarlo Simulated portfolios"
                 ) 
             data.insert(0, MonteCarlo)
