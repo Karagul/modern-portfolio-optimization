@@ -14,9 +14,10 @@ import plotly
 import plotly.plotly as py
 import plotly.graph_objs as go
 import re
-
-
+import plotly.offline as offline
 import pickle
+from time import sleep
+
 """
 Mess:
     Market returns in pct: 
@@ -33,16 +34,18 @@ TODO:
     - First derivative of efficient frontier??
 - ADD required return
 - ADD sanity check to see if wndow size and window move matches
+- ADD option to save 
 
 """
 
 class Calcualtion_pack():
     "L4NT0W"
     
-    def __init__(self, stock_ticks=["AAPL","MMM"], market_indecies=['^GSPC',"^DJI"], 
+    def __init__(self, stock_ticks=None, stock_names=None, market_indecies=None, 
                  start=datetime.datetime(1997, 1, 1), end=datetime.date.today(), 
-                 risk_free_rate= 0.02, shorting_allowed=False, 
-                 window_size=None, window_move=None, source="quandl"):
+                 risk_free_rate= 0.02, window_size=None, window_move=None, 
+                 source="quandl", online=False, n_sim=10000,
+                 name_of_data="develop", stack_windows=None):
 
         self.stock_ticks = stock_ticks
         self.market_indecies = market_indecies #Concatenate different markets indecies to get "real" market
@@ -50,19 +53,35 @@ class Calcualtion_pack():
         self.start = start
         self.end = end
         self.risk_free_rate = risk_free_rate
-        self.shorting_allowed=shorting_allowed
         self.window_move = window_move
         self.window_size = window_size
         self.source = source
+        self.online = online
+        self.n_sim = n_sim
+        self.stock_names = stock_names
+        self.save_data = True
+        self.name_of_data = name_of_data
+        self.stack_windows = stack_windows #ie. only one plot
+        def sanity_check():
+            self.plot_CML = True if self.risk_free_rate > 0 else False 
+            self.plot_simulation = True if self.n_sim > 0 and not self.stack_windows else False
+            self.plot_many_windows = True if self.window_size and self.window_move else False
+            # stack_windows only if window_size and window_move
+            # if not stock names use stock ticks
+            # Maximum 20 moving windows
+            # n_sim max 500.000 if offline and 30.000 if online
+            # start must be before end
 
-        self.develop = False
+        sanity_check()   
 
     def get_monthly_data(self):
-        if self.develop == True:
-            self.data = pickle.load( open( "develop.p", "rb" ) )
+        #TODO add better module for data management and auto naming files
+
+        if self.source == "pickle":
+            self.data = pickle.load(open( "{}.p".format(self.name_of_data), "rb" ) )
 
         else:
-            if self.source in ["google", "yahoo"]: #depricated 
+            if self.source in ["google", "yahoo"]: #DEPRICATED
                 raw_data = pdr.DataReader(self.market_indecies + self.stock_ticks, 
                                           self.source, self.start, self.end)
                 adj_data = raw_data["Close"]
@@ -70,15 +89,22 @@ class Calcualtion_pack():
             if self.source == "quandl":
                 adj_data = defaultdict()
                 for ticker in self.stock_ticks + self.market_indecies:
-                    data = QuandlReader(symbols="WIKI/{}".format(ticker), start=self.start, end=self.end).read()
-                    adj_data[ticker] =  data["AdjClose"]
+                    data = QuandlReader(symbols=ticker, start=self.start, end=self.end).read()
+
+                    if "AdjClose" in data.columns:
+                        adj_data[ticker] = data["AdjClose"]
+                    elif "IndexValue" in data.columns:
+                        adj_data[ticker] = data["IndexValue"]
+
+                    sleep(0.4)
 
                 adj_data = pd.DataFrame(adj_data)
 
             self.data = adj_data.groupby(pd.Grouper(freq='MS')).mean() #adjusted monthly data
+            if self.save_data: pickle.dump(self.data, open("{}.p".format(self.name_of_data), "wb")) 
 
     def calculate_log_change(self):
-        self.log_change_data = (np.log(self.data) - np.log(self.data).shift(1)).dropna()
+        self.log_change_data = (np.log(self.data) - np.log(self.data).shift(1)).dropna()[self.start:self.end]
 
     def calculate_covariance_and_var(self):
         self.cov_matrix = self.log_change_data.cov() * 12
@@ -149,22 +175,22 @@ class Calcualtion_pack():
                 R is the vector of expected returns
                 Rf is the 
                 C is the var-covariance matrix
-            """        
-
-            # TODO: add options to short and borrow           
+            """
+            # TODO: add options to short and borrow
 
             W = R*0 + 1/len(R) #Initialize equal procent weights
             #Bounds (inequality constraints)
             b = [(0.,1.) for i in W] # weights between 0%..100%. - no borrowing
             # Equality constraints
-            h = ({'type':'eq', 'fun': lambda W: sum(W)-1.}, # Sum of weights = 100% -No shorting 
-                 {'type':'eq', 'fun': lambda W: exp_return(W, R) - r})  # equalizes portfolio return to r
 
             def fitness(W, C, r):
                 Pv = quad_var(W, C) 
                 return Pv
             
             Vf, Wf = [], []
+
+            h = ({'type':'eq', 'fun': lambda W: sum(W)-1.}, # Sum of weights = 100% -No shorting 
+                 {'type':'eq', 'fun': lambda W: exp_return(W, R) - r})  # equalizes portfolio return to r   
 
             for r in Rf:
                 # For given level of return r, find weights which minimizes portfolio variance.
@@ -186,24 +212,28 @@ class Calcualtion_pack():
         self.frontier_exp_return = Rf #Y axis of EFF
         self.frontier_risk = Vf #X axis of EFF
         self.frontier_weights = [[round(w*100,2) for w in ws] for ws in Wf] #TODO might be done directly in pandas
+        
         rf = self.risk_free_rate
-        self.EFFsr = sharpe_ratio(Rf, Vf, rf) #sharpe ratio if portfolios on the eficient frontier
-        idx = np.argmax(self.EFFsr) # index of "market" portfolio
-        MPsr = self.EFFsr[idx] # sharpe ratio of "market" portfolio ie. slope of CML
-        self.Wmp = self.frontier_weights[idx]# weights of market portfolio
+        self.EFFsr = sharpe_ratio(Rf, Vf, rf) #sharpe ratio for portfolios on the eficient frontier
 
-        self.marketPx = Vf[idx] # "market" portfolio x and y
-        self.marketPy = Rf[idx]
+        idxmax = np.argmax(self.EFFsr) # index of "market" portfolio
+        MPsr = self.EFFsr[idxmax] # sharpe ratio of "market" portfolio ie. slope of CML
+        self.Wmp = self.frontier_weights[idxmax]# weights of market portfolio
+        self.marketPx = Vf[idxmax] # "market" portfolio x and y
+        self.marketPy = Rf[idxmax]
+
+        idxmin  = self.idxmin = np.argmin(Vf) # index of minimum risk portfolio
+        self.minriskPx = Vf[idxmin]
+        self.minriskPy = Rf[idxmin]
 
         self.CMLx = [0] + Vf
         self.CMLy = [CML(x, rf, MPsr) for x in self.CMLx]       
 
-        self.montecarlo = True
-        if self.montecarlo:
-            def MCsimulation(R, C, rf): # inspiration from: gist.github.com/PyDataBlog/2d5740e4199f2f898b68e154f8951ef2
+        if self.plot_simulation:
+            def MCsimulation(R, C, rf):
                 returns, volatility, ratio = [], [], []
-                for single_portfolio in range(10000): # number of simulations
-                    W = np.random.random(len(self.stock_ticks))
+                for single_portfolio in range(self.n_sim):
+                    W = np.random.normal(scale=3,size=len(self.stock_ticks))**2
                     W /= np.sum(W)
                     ret = exp_return(W, R)
                     vol = quad_var(W, C)
@@ -214,93 +244,124 @@ class Calcualtion_pack():
                 self.MCx = volatility
                 self.MCy = returns
                 self.MCsr = ratio
+
             MCsimulation(R, C, rf)
 
     
-    def plot_EFF(self):
-        Xeef = self.frontier_risk
-        Yeef = self.frontier_exp_return
-
-        plotly.tools.set_credentials_file(username="TheVizWiz", api_key="92x5KNp4VDPBDGNtLR2l")
-
+    def prepare_plot(self):
+        
         def annotaions():
-            PD = pd.DataFrame(self.frontier_weights, columns=self.stock_ticks)
-            T = [re.sub(r'\n', "% -- ", re.sub(r'[ ]+', " ", PD.iloc[i].to_string() )) for i in PD.index]
+            PD = pd.DataFrame(self.frontier_weights, columns=self.stock_names)
+            T = [re.sub(r'\n', "% <br>", re.sub(r'[ ]+', " ", PD.iloc[i].to_string() )) for i in PD.index]
             return T
 
-        EEF = go.Scatter(
-                x=Xeef,
-                y=Yeef,
-                mode='lines+markers',
-                marker = dict(size=8),
-                text = annotaions(),
-                name = "Efficient Frontier"
-                )
+        start = "{0}-{1}-{2}".format(self.start.day, self.start.month, self.start.year)
+        end = "{0}-{1}-{2}".format(self.end.day, self.end.month, self.end.year)
+        self.name = name = "{0} - {1}".format(start, end)
+        EFP_weights = str(zip(self.Wmp, self.stock_names))
 
-        EFP_weights = str(zip(self.Wmp, self.stock_ticks))
+        EFF = go.Scatter(
+                x = self.frontier_risk[self.idxmin:],
+                y = self.frontier_exp_return[self.idxmin:],
+                mode = 'lines+markers',
+                legendgroup = name,
+                marker = dict(size=5),
+                text = annotaions(),
+                name = "Efficient frontier<br>" + name 
+                )
 
         EFP = go.Scatter(
                 x = self.marketPx,
                 y = self.marketPy,
                 mode = 'markers',
+                legendgroup = name,
                 marker = dict(size=10, symbol="circle"),
                 text =  EFP_weights,
                 name = "Market/Efficient portfolio"
                 )
 
-        data = [EEF, EFP]
+        MVP = go.Scatter(
+                x = self.minriskPx,
+                y = self.minriskPy,
+                mode = "markers",
+                legendgroup = name,
+                marker = dict(size=10, symbol="circle"),
+                name = "minimum variance portfolio"
+                )
 
-        if self.risk_free_rate > 0:
+        data = [EFF, EFP, MVP]
+
+        if self.plot_CML:
             CML = go.Scatter(
                 x = self.CMLx,
                 y = self.CMLy,
                 mode='lines',
+                legendgroup = name,
                 #text = "Captial Market Line", #solve weights and show as text
                 name = "Capital market line"
                 #marker = make coler outside space of efficient frontier different collor
                 )
             data.insert(0, CML)
 
-        if self.montecarlo:
+        if self.plot_simulation:
             MonteCarlo = go.Scatter(
                 x = self.MCx,
                 y = self.MCy,
                 mode = "markers",
-                marker = dict(colorscale="Electric", color=self.MCsr, showscale=True, 
+                marker = dict(size=6, colorscale="Electric", color=self.MCsr, showscale=True, 
                               colorbar=dict(title="Sharpe Ratio", titleside="right")),
                 name = "MonteCarlo Simulated portfolios"
                 ) 
             data.insert(0, MonteCarlo)
 
-        start = "{0}/{1}-{2}".format(self.start.day, self.start.month, self.start.year)
-        end = "{0}/{1}-{2}".format(self.end.day, self.end.month, self.end.year)
-        layout = go.Layout(
+        title = "Efficent Frontier"
+        if not self.plot_many_windows:
+            title = format("{0}<br>from {1} to {2}".format(title, start, end)) 
+        self.layout = go.Layout(
             legend=dict(
-                x=0,
-                y=1,
-                traceorder='normal',
+                x=1.2,
+                y=1.2,
+                traceorder='grouped',
+                tracegroupgap=20,
                 font=dict(
                     family='sans-serif',
-                    size=12,
+                    size=20,
                     color='#000'
-                ),
+                    ),
                 bgcolor='#E2E2E2',
                 bordercolor='#FFFFFF',
                 borderwidth=2
-            ),
-            title= "Efficent Frontier: from {} to {}".format(start, end),
+                ),
+            title=title,
             showlegend=True,
-            hovermode= 'closest',
-            yaxis = dict(title="Portfolio Return"),
-            xaxis = dict(title="Portfolio Variance"),
-            height=600,
-            width=600,
-        )
+            font=dict(
+                    size=20,
+                    color='#000'
+                    ),
+            hovermode='closest',
+            yaxis=dict(title="Portfolio Return"),
+            xaxis=dict(title="Portfolio Variance"),
+            height=1000,
+            width=1200,  
+            )
 
-        fig = go.Figure(data=data, layout=layout)
-        plot_url = py.plot(fig, filename='efficent_frontier')  
+        self.plot_data += data
     
-    
+    def execute_plot(self):
+        fig = go.Figure(data=self.plot_data, layout=self.layout)
+        self.plot_data = list()
+
+        if self.online:
+            plotly.tools.set_credentials_file(username="TheVizWiz", api_key="92x5KNp4VDPBDGNtLR2l")
+            py.plot(fig, filename='efficent_frontier')
+
+        if not self.online:
+            name = self.name_of_data + self.name
+            plot_url =  offline.plot(fig, image='png',auto_open=True, image_filename=name,
+                                     output_type='file', image_width=1200, image_height=1000, 
+                                     filename=name+".html")
+        
+
     def analyze_data(self):
         self.calculate_log_change()
         self.calculate_covariance_and_var()
@@ -312,44 +373,58 @@ class Calcualtion_pack():
 
 
     def run_pack(self):
+        self.get_monthly_data()
+        self.plot_data = list()
 
         def one_window():
-            self.get_monthly_data()
             self.analyze_data()
-            self.plot_EFF()
+            self.prepare_plot()
 
-        if self.window_size and self.window_move:
+        if self.plot_many_windows:
 
-            def with_moving_window(func):
+            def with_moving_window(generate_window):
                 def func_wrapper():
-
                     time = self.end - self.start
                     window = datetime.timedelta(days=self.window_size)
                     window_m = datetime.timedelta(days=self.window_move)
 
-                    while time >= datetime.timedelta(1):
+                    while time-window >= datetime.timedelta(1):
                         self.end = self.start + window
-                        func()
+                        generate_window()
+                        self.execute_plot()
                         self.start = self.start + window_m
                         time -= window_m
 
                 return func_wrapper
-           
-            with_moving_window(one_window)()
 
+            with_moving_window(one_window)()
+            
             
         else:
             one_window()
+            self.execute_plot()
+
+        
 
 if __name__ == '__main__':
   
-    CP = Calcualtion_pack(stock_ticks=["AAPL","MMM", "GOOGL", "AMZN"], 
-                            market_indecies=["NDAQ"],
-                            start=datetime.datetime(2005, 1, 1), 
-                            end=datetime.datetime(2008,1,1), 
+    CP = Calcualtion_pack(
+                            stock_ticks = ["WIKI/AAPL", "WIKI/ABC", "WIKI/AGN", "WIKI/ADP", "WIKI/ADSK", "WIKI/IBM", "WIKI/GE"],
+                            stock_names = "APL ABC AGN ADP ADSK IBM GE".split(),
+                            # stock_ticks=["NASDAQOMX/NQDK4000DKK", "NASDAQOMX/NQDE", "NASDAQOMX/NQJP2000JPY",
+                            #     "NASDAQOMX/NQHK2000HKD", "NASDAQOMX/NQGB", "NASDAQOMX/NQSE",
+                            #     "NASDAQOMX/NQFI"],
+                            market_indecies=["GOOGL"],
+                            start=datetime.datetime(2003, 1, 1), 
+                            end=datetime.datetime(2018,1,1), 
                             risk_free_rate= 0.02,
+                            source = "pickle",
+                            name_of_data = "USA",
+                            n_sim = 10000,
+                            online = False,
                             # window_size=3650, 
-                            # window_move=365
+                            # window_move=365,
+                            #stack_windows = True
                             )
   
     CP.run_pack()
