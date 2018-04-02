@@ -48,8 +48,10 @@ class Calcualtion_pack():
                  start=datetime.datetime(1997, 1, 1), end=datetime.date.today(), 
                  risk_free_rate=0.0, window_size=None, window_move=None, 
                  source="quandl", online=False, n_sim=0, annotations=None,
-                 name_of_data="develop", stack_windows=None, required_return=None):
+                 name_of_data="develop", stack_windows=None, required_return=None, 
+                 auto_open=False):
 
+        self.auto_open = auto_open
         self.stock_ticks = stock_ticks
         self.market_indecies = market_indecies #Concatenate different markets indecies to get "real" market
                                                 # Possibly do this with different weights
@@ -71,14 +73,19 @@ class Calcualtion_pack():
 
         def logic_gate():
             self.plot_as_windows = True if self.window_size and self.window_move else False
+            if self.plot_as_windows:
+                self.CAPMs = list()
+                if self.required_return: self.CMLpw_weights = list()
+
             if not self.plot_as_windows: self.stack_windows = None # dont stack if only one window
             self.plot_CML = True if self.risk_free_rate > 0 else False 
             self.plot_simulation = True if self.n_sim > 0 and not self.stack_windows else False
             if self.stack_windows: self.annotations = False
+            
 
         def sanity_check():
             pass
-            # stack_windows only if window_size and window_move
+            #TODO:
             # if not stock names use stock ticks
             # Maximum 20 moving windows
             # n_sim max 80.000 if offline and 30.000 if online
@@ -144,6 +151,16 @@ class Calcualtion_pack():
         self.cov_matrix = self.data_window.cov() * 12
         self.var = pd.Series(np.diag(self.cov_matrix), index=[self.cov_matrix.columns])
         
+
+    def CAPM_prediction(self):
+        rf = self.risk_free_rate
+        b =  self.var.drop(self.market_indecies)
+        Rm = self.market_returns_yr
+        self.CAPM = sum((rf + b*(Rm-rf).values) * (self.Wmp))/100 #CAPM times weigths of market portfolio
+
+        if self.plot_as_windows: 
+            self.CAPMs.append(self.CAPM)
+
 
     def calculate_beta(self): #can be done vith linalg cov_matrix * var 
         #getting beta as covar/var
@@ -267,63 +284,67 @@ class Calcualtion_pack():
         self.minriskPx = Vf[idxmin]
         self.minriskPy = Fr[idxmin]
 
-        #CAPITAL MARKET LINE
-        self.CMLx = np.linspace(0, max(Vf), num=100) 
-        self.CMLy = [CML(x, rf, MPsr) for x in self.CMLx]
+        if self.plot_CML:
+            #CAPITAL MARKET LINE
+            self.CMLx = np.linspace(0, max(Vf), num=100) 
+            self.CMLy = [CML(x, rf, MPsr) for x in self.CMLx]
 
-       
-        def qsolve1(CMLy, CMLx, C, R): #TODO: make 1 Qsolver with intuitive changeable constraints
+           
+            def qsolve1(CMLy, CMLx, C, R): #TODO: make 1 Qsolver with intuitive changeable constraints
 
-            W = R*0 + 1/len(C) #Initialize equal procent weights
-            #Bounds (inequality constraints)
-            b = [(0.,2.) for i in W] # weights between 0%..100%. - no borrowing  -No shorting 
+                W = R*0 + 1/len(R) #Initialize equal procent weights
+                rf = self.risk_free_rate
+
+                #Bounds (inequality constraints)
+                b = [(0.,2.) for i in W] # weights between 0%..100%. - no borrowing  -No shorting 
             
-            def fitness(W, x, y, re, ri):
-                Pv = sharpe_ratio(x, y, self.risk_free_rate)
-                return - Pv.sum()
-            
-            Vf, Wf = [], []
+                def fitness(W, x, y, rf, ri, re):
+                    Pv = sharpe_ratio(x, y, rf)
+                    return - Pv.sum()
+                
+                Vf, Wf = [], []
+                # Equality constraints
+                h = ({'type':'eq', 'fun': lambda W: sum(W)-1.}, # Sum of weights = 100%
+                     {'type':'eq', 'fun': lambda W: quad_var(W, C) - ri}, # equalizes portfolio risk to ri
+                     {'type':'eq', 'fun': lambda W: exp_return1(W, R, rf) - re})  # equalizes portfolio return to re 
 
-            # Equality constraints
-            h = ({'type':'eq', 'fun': lambda W: sum(W)-1.}, # Sum of weights = 100%
-                 {'type':'eq', 'fun': lambda W: quad_var(W, C) - ri}, # equalizes portfolio risk to ri
-                 {'type':'eq', 'fun': lambda W: exp_return1(W, R, self.risk_free_rate) - re})  # equalizes portfolio return to re 
+                for ri, re in zip(CMLx, CMLy):
+                    # For given level of return r, find weights which minimizes portfolio variance.
+                    optimized = minimize(fitness, W, args=(CMLx, CMLy, rf, ri, re), method='SLSQP', #Sequential Least SQuares Programming 
+                                         constraints=h, bounds=b)
+                    
+                    X = optimized.x
+                    Wf.append(X)
+                    Vx = quad_var(X,C)
+                    Vf.append(Vx)
 
-            for ri, re in zip(CMLx, CMLy):
-                # For given level of return r, find weights which minimizes portfolio variance.
-                optimized = minimize(fitness, W, args=(CMLx, CMLy, ri, re), method='SLSQP', #Sequential Least SQuares Programming 
-                                     constraints=h, bounds=b)
-                X = optimized.x
-                Wf.append(X)
-                Vx = quad_var(X,C)
-                Vf.append(Vx)
+                return Vf, Wf
 
-            return Vf, Wf
+            R1 = self.exp_return_yr
+            R1["Rf"] = self.risk_free_rate
+            R1 = R1.values
 
-        R1 = self.exp_return_yr
-        R1["Rf"] = self.risk_free_rate
-        R1 = R1.values
+            C1 = self.cov_matrix.iloc[:-1,:-1]
+            C1["Rf"] = 0.0
+            C1.loc["Rf"] = 0.0
+            C1 = C1.values
 
-        C1 = self.cov_matrix.iloc[:-1,:-1]
-        C1["Rf"] = 0.0
-        C1.loc["Rf"] = 0.0
-        C1 = C1.values
+            _, Wcml = qsolve1(self.CMLy, self.CMLx, C1, R1)
 
-        _, Wcml = qsolve1(self.CMLy, self.CMLx, C1, R1)
-
-        self.CML_weights = [[round(w*100,2) for w in ws] for ws in Wcml]
+            self.CML_weights = [[round(w*100,2) for w in ws] for ws in Wcml]
 
 
-        #portfolio on CML with rr as return
-        if self.required_return:
-             # DANGER! Mess ahead
+            #portfolio on CML with rr as return
+            if self.required_return:
+                 # DANGER! Mess ahead
 
-            rr = self.required_return
-            risk = (rr-rf)/MPsr
-            self.CMLPx = risk
-            self.CMLPy = rr
-            _, CMLpw = qsolve1(np.array([rr]), np.array([risk]), C1, R1)
-            self.CMLpw = [round(w*100,2) for w in CMLpw[0]] #Fix: why index?
+                rr = self.required_return
+                risk = (rr-rf)/MPsr
+                self.CMLPx = risk
+                self.CMLPy = rr
+                _, CMLpw = qsolve1(np.array([rr]), np.array([risk]), C1, R1)
+                self.CMLpw = [round(w*100,2) for w in CMLpw[0]] #Fix: why index?
+                if self.plot_as_windows: self.CMLpw_weights.append(self.CMLpw)
 
         if self.plot_simulation:
             def MCsimulation(R, C, rf):
@@ -430,17 +451,17 @@ class Calcualtion_pack():
                 )
             data.append(CML)
 
-        if self.required_return:
-            CMLp = go.Scatter(
-                x = [self.CMLPx],
-                y = [self.CMLPy],
-                mode = "markers",
-                legendgroup = name if self.stack_windows else None,
-                text = weights_in_text("CMLp"),
-                name = "optimal asset allocation on CML",
-                marker = dict(size=15, symbol="diamond-x")
-                )
-            data.append(CMLp)
+            if self.required_return:
+                CMLp = go.Scatter(
+                    x = [self.CMLPx],
+                    y = [self.CMLPy],
+                    mode = "markers",
+                    legendgroup = name if self.stack_windows else None,
+                    text = weights_in_text("CMLp"),
+                    name = "optimal allocation<br>with required return of {0}%".format(self.required_return*100),
+                    marker = dict(size=15, symbol="diamond-x")
+                    )
+                data.append(CMLp)
 
         if self.plot_simulation:
             MonteCarlo = go.Scatter(
@@ -500,8 +521,8 @@ class Calcualtion_pack():
 
         if not self.online:
             name = self.name_of_data + self.name
-            plot_url =  offline.plot(fig, image='png',auto_open=True, image_filename=name,
-                                     output_type='file', image_width=1200, image_height=1000, 
+            plot_url =  offline.plot(fig, image='png',auto_open=self.auto_open, image_filename=name,
+                                     output_type='file', image_width=1200, image_height=1000,
                                      filename="figures/{0}.html".format(name) # run some sys to create folder
                                      )
         self.plot_data = list() # Clear plot data when plot is made
@@ -535,10 +556,11 @@ class Calcualtion_pack():
         self.calculate_regress_params()
         self.calculate_exp_return()
         self.solve_elements_for_plot()
-
-
+        self.CAPM_prediction()
+        
     def run_backtest(self):
         #cross-validation of model (WARNING: NOT PRETTY! - gaffataped in last moment)
+        # TODO. can't run backtest after run_pack why? fix!
         self.window_size=365 
         self.window_move=365
         self.market_portfolios = list()
@@ -583,20 +605,21 @@ if __name__ == '__main__':
                             # stock_ticks=["NASDAQOMX/NQDK4000DKK", "NASDAQOMX/NQDE", "NASDAQOMX/NQJP2000JPY",
                             #     "NASDAQOMX/NQHK2000HKD", "NASDAQOMX/NQGB", "NASDAQOMX/NQSE",
                             #     "NASDAQOMX/NQFI"],
-                            market_indecies=["NASDAQOMX/NDX"],
+                            market_indecies=["GOOGL"],
                             start=datetime.datetime(1999, 1, 1), 
                             end=datetime.datetime(2018,1,1), 
-                            # risk_free_rate= 0.01,
+                            risk_free_rate= 0.03,
                             source = "pickle",
                             name_of_data = "USA",
-                            # n_sim = 10000,
+                            n_sim = 10000,
                             # online = True,
-                            window_size=3650, 
-                            window_move=365,
-                            stack_windows = True,
-                            annotations=True
-                            
+                            # window_size=3650, 
+                            # window_move=365,
+                            # stack_windows = True,
+                            annotations=True,
+                            auto_open=True,
+                            required_return=0.177                            
                             )
   
     CP.run_pack()
-    # CP 
+    # CP    
